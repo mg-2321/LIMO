@@ -1,5 +1,6 @@
 //To compile:nvcc -o resnet_encoder /home/NETID/gayat23/cuda_assignment/sc_depth_pl/resnet_encoder.cu `pkg-config --cflags --libs opencv` -std=c++17 -lstdc++fs
 //To compile:./resnet_encoder /home/NETID/gayat23/cuda_/sc_depth_pl/datasets/__pycache__/kitti/training/2011_09_26_drive_0001_sync_02/ /home/NETID/gayat23/cuda_/sc_depth_pl/datasets/__pycache__/kitti/training/2011_09_26_drive_0001_sync_02/frame_index.txt
+//For feature extraxtion, I tried different kernel fusions but 1d kernel seems to not work out. Will mention the in-depth reason in the report.
 
 #include <opencv2/opencv.hpp>
 #include <cuda_runtime.h>
