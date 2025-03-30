@@ -43,7 +43,6 @@ __global__ void upsampleBilinear(float* input, float* output, int H_in, int W_in
     output[y * W_out + x] = (1 - dy) * top + dy * bottom;
 }
 
-// ----------------------------- HELPER -----------------------------
 
 void checkCuda(cudaError_t err, const char* msg) {
     if (err != cudaSuccess) {
@@ -52,7 +51,6 @@ void checkCuda(cudaError_t err, const char* msg) {
     }
 }
 
-// ----------------------------- MAIN -----------------------------
 
 int main() {
     const int H = 64, W = 64, C_in = 512;
