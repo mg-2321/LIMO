@@ -3,7 +3,7 @@
 -L/usr/local/cuda/lib64 -lcudart `pkg-config --libs opencv` -lstdc++fs \
 -o generate_valid_frame_index /home/NETID/gayat23/cuda_assignment/sc_depth_pl/generate_valid_frame_index.cu
 // To run:./generate_valid_frame_index /home/NETID/gayat23/cuda_assignment/sc_depth_pl/datasets/__pycache__/kitti/training
-// Please update your path accordingly.
+
 #include <opencv2/opencv.hpp>
 #include <cuda_runtime.h>
 #include <filesystem>
