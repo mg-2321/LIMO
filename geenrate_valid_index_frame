@@ -1,0 +1,197 @@
+//Generating valid frames text from the training images of data
+//To compile:nvcc -std=c++17 -I/usr/local/cuda/include `pkg-config --cflags opencv` \
+-L/usr/local/cuda/lib64 -lcudart `pkg-config --libs opencv` -lstdc++fs \
+-o generate_valid_frame_index /home/NETID/gayat23/cuda_assignment/sc_depth_pl/generate_valid_frame_index.cu
+// To run:./generate_valid_frame_index /home/NETID/gayat23/cuda_assignment/sc_depth_pl/datasets/__pycache__/kitti/training
+// Please update your path accordingly.
+#include <opencv2/opencv.hpp>
+#include <cuda_runtime.h>
+#include <filesystem>
+#include <fstream>
+#include <vector>
+#include <iostream>
+#include <algorithm>
+
+using namespace cv;
+using namespace std;
+namespace fs = std::filesystem;
+
+// CUDA kernel: compute pixelwise difference with shared memory
+__global__ void computeDifferenceKernel(uchar* gray1, uchar* gray2, int* diff_mask, int h, int w) {
+    __shared__ uchar tile1[16][16];
+    __shared__ uchar tile2[16][16];
+
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    int idx = y * w + x;
+
+    if (x < w && y < h) {
+        tile1[threadIdx.y][threadIdx.x] = gray1[idx];
+        tile2[threadIdx.y][threadIdx.x] = gray2[idx];
+    }
+    __syncthreads();
+
+    if (x < w && y < h) {
+        int diff = abs(tile1[threadIdx.y][threadIdx.x] - tile2[threadIdx.y][threadIdx.x]);
+        diff_mask[idx] = (diff > 10) ? 1 : 0;
+    }
+}
+
+// Compute movement ratio using CUDA by comparing two frames.
+// This version measures kernel time and memory transfer time.
+float compute_difference_ratio_cuda(const Mat& frame1, const Mat& frame2) {
+    Mat gray1, gray2;
+    cvtColor(frame1, gray1, COLOR_BGR2GRAY);
+    cvtColor(frame2, gray2, COLOR_BGR2GRAY);
+
+    if (gray1.size() != gray2.size()) {
+        cerr << "Error: Image sizes do not match!" << endl;
+        return -1;
+    }
+
+    int h = gray1.rows, w = gray1.cols;
+    int imgSize = h * w;
+
+    // Allocate device memory
+    uchar *d_gray1, *d_gray2;
+    int *d_diff_mask;
+    cudaMalloc(&d_gray1, imgSize * sizeof(uchar));
+    cudaMalloc(&d_gray2, imgSize * sizeof(uchar));
+    cudaMalloc(&d_diff_mask, imgSize * sizeof(int));
+
+    // Create CUDA events for timing
+    cudaEvent_t memStart, memStop, kernelStart, kernelStop;
+    cudaEventCreate(&memStart);
+    cudaEventCreate(&memStop);
+    cudaEventCreate(&kernelStart);
+    cudaEventCreate(&kernelStop);
+
+    // Measure Host-to-Device memory transfer time
+    cudaEventRecord(memStart, 0);
+    cudaMemcpy(d_gray1, gray1.data, imgSize * sizeof(uchar), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_gray2, gray2.data, imgSize * sizeof(uchar), cudaMemcpyHostToDevice);
+    cudaEventRecord(memStop, 0);
+    cudaEventSynchronize(memStop);
+    float memTransferTimeHtoD;
+    cudaEventElapsedTime(&memTransferTimeHtoD, memStart, memStop);  // in ms
+
+    // Set up grid and block dimensions
+    dim3 blockSize(16, 16);
+    dim3 gridSize((w + blockSize.x - 1) / blockSize.x, (h + blockSize.y - 1) / blockSize.y);
+
+    // Measure kernel execution time
+    cudaEventRecord(kernelStart, 0);
+    computeDifferenceKernel<<<gridSize, blockSize>>>(d_gray1, d_gray2, d_diff_mask, h, w);
+    cudaEventRecord(kernelStop, 0);
+    cudaEventSynchronize(kernelStop);
+    float kernelTime;
+    cudaEventElapsedTime(&kernelTime, kernelStart, kernelStop); // in ms
+
+    // Measure Device-to-Host memory transfer time
+    vector<int> diff_mask(imgSize);
+    cudaEventRecord(memStart, 0);
+    cudaMemcpy(diff_mask.data(), d_diff_mask, imgSize * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaEventRecord(memStop, 0);
+    cudaEventSynchronize(memStop);
+    float memTransferTimeDtoH;
+    cudaEventElapsedTime(&memTransferTimeDtoH, memStart, memStop);  // in ms
+
+    // Total memory transfer time (HtoD + DtoH)
+    float totalMemTransferTime = memTransferTimeHtoD + memTransferTimeDtoH;
+
+    // Print the measured times
+    printf("Kernel Time: %f ms, Total Memory Transfer Time: %f ms\n", kernelTime, totalMemTransferTime);
+
+    // Clean up events and device memory
+    cudaEventDestroy(memStart);
+    cudaEventDestroy(memStop);
+    cudaEventDestroy(kernelStart);
+    cudaEventDestroy(kernelStop);
+    cudaFree(d_gray1);
+    cudaFree(d_gray2);
+    cudaFree(d_diff_mask);
+
+    // Compute and return the movement ratio
+    int sum_diff = 0;
+    for (int val : diff_mask) {
+        sum_diff += val;
+    }
+    return static_cast<float>(sum_diff) / imgSize;
+}
+
+// Generate valid frame indices for a given scene (directory)
+vector<int> generate_index(const fs::path &scene) {
+    vector<fs::path> images;
+    // Collect all .jpg files in the scene directory
+    for (const auto &entry : fs::directory_iterator(scene)) {
+        if (entry.is_regular_file() && entry.path().extension() == ".jpg") {
+            images.push_back(entry.path());
+        }
+    }
+    // Sort images lexicographically
+    sort(images.begin(), images.end());
+
+    vector<int> index;
+    if (images.empty()) {
+        cerr << "No images found in scene: " << scene << endl;
+        return index;
+    }
+    index.push_back(0); // Always select the first frame
+
+    // Compare each subsequent frame with the last valid frame.
+    for (size_t i = 1; i < images.size(); i++) {
+        Mat frame1 = imread(images[index.back()].string());
+        Mat frame2 = imread(images[i].string());
+        if (frame1.empty() || frame2.empty()) {
+            cerr << "Could not load image: " << images[i] << endl;
+            continue;
+        }
+        float move_ratio = compute_difference_ratio_cuda(frame1, frame2);
+        if (move_ratio < 0.5) // Skip if movement is too low
+            continue;
+        index.push_back(i);
+    }
+    cout << "Scene: " << scene.filename() << " Total images: " << images.size() 
+         << ", Valid frames: " << index.size() << endl;
+    return index;
+}
+
+int main(int argc, char** argv) {
+    if (argc < 2) {
+        cerr << "Usage: " << argv[0] << " <training_directory>" << endl;
+        return -1;
+    }
+
+    // Use the provided training directory directly
+    fs::path trainingDir(argv[1]);
+    if (!fs::exists(trainingDir) || !fs::is_directory(trainingDir)) {
+        cerr << "Training directory does not exist: " << trainingDir << endl;
+        return -1;
+    }
+
+    // Get all scene directories under the training directory
+    vector<fs::path> scenes;
+    for (const auto &entry : fs::directory_iterator(trainingDir)) {
+        if (entry.is_directory()) {
+            scenes.push_back(entry.path());
+        }
+    }
+    sort(scenes.begin(), scenes.end());
+
+    // Process each scene
+    for (const auto &scene : scenes) {
+        cout << "Processing scene: " << scene << endl;
+        vector<int> validIndices = generate_index(scene);
+        fs::path outfile = scene / "frame_index.txt";
+        ofstream ofs(outfile);
+        if (!ofs) {
+            cerr << "Could not open file for writing: " << outfile << endl;
+            continue;
+        }
+        for (int idx : validIndices) {
+            ofs << idx << "\n";
+        }
+        ofs.close();
+    }
+    return 0;
+}
